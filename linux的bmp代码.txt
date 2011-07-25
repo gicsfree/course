@@ -1,0 +1,630 @@
+
+//////////////////////////////////////////////////bmp.c///////////////////////////////////////////////////////////////////////////////
+/*
+    fbv  --  simple image viewer for the linux framebuffer
+    Copyright (C) 2002  Tomasz Sterna
+
+    This program is free software; you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation; either version 2 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program; if not, write to the Free Software
+    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+*/
+#include "config.h"
+#ifdef FBV_SUPPORT_BMP
+#include "fbv.h"
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+
+#define BMP_TORASTER_OFFSET	10
+#define BMP_SIZE_OFFSET		18
+#define BMP_BPP_OFFSET		28
+#define BMP_RLE_OFFSET		30
+#define BMP_COLOR_OFFSET	54
+
+#define fill4B(a)	( ( 4 - ( (a) % 4 ) ) & 0x03)
+
+struct color {
+	unsigned char red;
+	unsigned char green;
+	unsigned char blue;
+};
+
+int fh_bmp_id(char *name)//读取位图头信息，判断是否为"BM" 
+{
+	int fd;
+	char id[2];
+	
+	fd = open(name, O_RDONLY);//打开文件
+	if (fd == -1) {
+		return(0);
+	}
+	
+	read(fd, id, 2);
+	close(fd);
+	if ( id[0]=='B' && id[1]=='M' ) {
+		return(1);
+	}
+	return(0);
+}
+
+void fetch_pallete(int fd, struct color pallete[], int count)//获取调色板信息
+{
+	unsigned char buff[4];
+	int i;
+
+	lseek(fd, BMP_COLOR_OFFSET, SEEK_SET);//fd,28,SEEK_SET:参数28为新的读写位置
+	for (i=0; i<count; i++) {
+		read(fd, buff, 4);//将fd所指向的文件的4个字节传送给缓冲区（指针）buff所指内存中
+		pallete[i].red = buff[2];
+		pallete[i].green = buff[1];
+		pallete[i].blue = buff[0];
+	}
+	return;
+}
+
+int fh_bmp_load(char *name,unsigned char *buffer, unsigned char **alpha, int x,int y)
+{
+
+
+#if 1
+	int fd, bpp, raster, i, j, k, skip;
+	unsigned char buff[4];
+	unsigned char *wr_buffer = buffer + x*(y-1)*3;
+	struct color pallete[256];
+     
+	fd = open(name, O_RDONLY);
+	
+	 
+	if (fd == -1) {
+		return(FH_ERROR_FILE);
+	}
+
+	if (lseek(fd, BMP_TORASTER_OFFSET, SEEK_SET) == -1) {//从文件10处开始读写
+		return(FH_ERROR_FORMAT);
+	}
+	read(fd, buff, 4);
+	raster = buff[0] + (buff[1]<<8) + (buff[2]<<16) + (buff[3]<<24);//由上面可知：从bfOffBits
+																	//开始四个字节：每一行扫描的字节数？
+
+	if (lseek(fd, BMP_BPP_OFFSET, SEEK_SET) == -1) {
+		return(FH_ERROR_FORMAT);
+	}
+	read(fd, buff, 2);
+	bpp = buff[0] + (buff[1]<<8);//可得biBitCount(从28开始2个字节)
+	
+	switch (bpp){
+		case 1: /* monochrome 单色 */
+			skip = fill4B(x/8+(x%8?1:0));
+	/*#define fill4B(a)	( ( 4 - ( (a) % 4 ) ) & 0x03)
+		1.BMP文件记录一行图像是以字节为单位的。因此，就不存在一个字节中的数据位信息表示的点在不同的两行中。也就是说，
+	设显示模式位16色，在每个字节分配两个点信息时，如果图像的宽度位奇数，那么最后一个像素点的信息将独占一个字节，
+	这个字节的后4位将没有意义。接下来的一个字节将开始记录下一行的信息。
+	2.为了显示的方便，除了真彩色外，其他的每中颜色模式的行字节数要用数据“00”补齐为4的整数倍。
+	如果显示模式为16色，当图像宽为19时，存储时每行则要补充4-(19/2+1)%4=2个字节
+	（加1是因为里面有一个像素点要独占了一字节）。如果显示模式为256色，当图像宽为19时，每行也要补充4-19%4=1个字节。
+
+	*/
+			lseek(fd, raster, SEEK_SET);
+			for (i=0; i<y; i++) {
+				for (j=0; j<x/8; j++) {
+					read(fd, buff, 1);
+					for (k=0; k<8; k++) {
+						if (buff[0] & 0x80) {
+							*wr_buffer++ = 0xff;
+							*wr_buffer++ = 0xff;
+							*wr_buffer++ = 0xff;
+						} else {
+							*wr_buffer++ = 0x00;
+							*wr_buffer++ = 0x00;
+							*wr_buffer++ = 0x00;
+						}
+						buff[0] = buff[0]<<1;
+					}
+					
+				}
+				if (x%8) {
+					read(fd, buff, 1);
+					for (k=0; k<x%8; k++) {
+						if (buff[0] & 0x80) {
+							*wr_buffer++ = 0xff;
+							*wr_buffer++ = 0xff;
+							*wr_buffer++ = 0xff;
+						} else {
+							*wr_buffer++ = 0x00;
+							*wr_buffer++ = 0x00;
+							*wr_buffer++ = 0x00;
+						}
+						buff[0] = buff[0]<<1;
+					}
+					
+				}
+				if (skip) {
+					read(fd, buff, skip);
+				}
+				wr_buffer -= x*6; /* backoff 2 lines - x*2 *3 */
+			}
+			break;
+		case 4: /* 4bit palletized */
+			skip = fill4B(x/2+x%2);//#define fill4B(a)	( ( 4 - ( (a) % 4 ) ) & 0x03)
+			fetch_pallete(fd, pallete, 16);
+			lseek(fd, raster, SEEK_SET);
+			for (i=0; i<y; i++) {
+				for (j=0; j<x/2; j++) {
+					read(fd, buff, 1);
+					buff[1] = buff[0]>>4;
+					buff[2] = buff[0] & 0x0f;
+					*wr_buffer++ = pallete[buff[1]].red;
+					*wr_buffer++ = pallete[buff[1]].green;
+					*wr_buffer++ = pallete[buff[1]].blue;
+					*wr_buffer++ = pallete[buff[2]].red;
+					*wr_buffer++ = pallete[buff[2]].green;
+					*wr_buffer++ = pallete[buff[2]].blue;
+				}
+				if (x%2) {
+					read(fd, buff, 1);
+					buff[1] = buff[0]>>4;
+					*wr_buffer++ = pallete[buff[1]].red;
+					*wr_buffer++ = pallete[buff[1]].green;
+					*wr_buffer++ = pallete[buff[1]].blue;
+				}
+				if (skip) {
+					read(fd, buff, skip);
+				}
+				wr_buffer -= x*6; /* backoff 2 lines - x*2 *3 */
+			}
+			break;
+		case 8: /* 8bit palletized */
+			skip = fill4B(x);
+			fetch_pallete(fd, pallete, 256);
+			lseek(fd, raster, SEEK_SET);
+			for (i=0; i<y; i++) {
+				for (j=0; j<x; j++) {
+					read(fd, buff, 1);
+					*wr_buffer++ = pallete[buff[0]].red;
+					*wr_buffer++ = pallete[buff[0]].green;
+					*wr_buffer++ = pallete[buff[0]].blue;
+				}
+				if (skip) {
+					read(fd, buff, skip);
+				}
+				wr_buffer -= x*6; /* backoff 2 lines - x*2 *3 */
+			}
+			break;
+		case 16: /* 16bit RGB */
+			return(FH_ERROR_FORMAT);
+			break;
+		case 24: /* 24bit RGB */
+			skip = fill4B(x*3);
+			lseek(fd, raster, SEEK_SET);
+			for (i=0; i<y; i++) {
+				for (j=0; j<x; j++) {
+					read(fd, buff, 3);
+					*wr_buffer++ = buff[2];
+					*wr_buffer++ = buff[1];
+					*wr_buffer++ = buff[0];
+				}
+				if (skip) {
+					read(fd, buff, skip);
+				}
+				wr_buffer -= x*6; /* backoff 2 lines - x*2 *3 */
+			}
+			break;
+		default:
+			return(FH_ERROR_FORMAT);
+	}
+
+	close(fd);
+	return(FH_ERROR_OK);
+#endif
+}
+int fh_bmp_getsize(char *name,int *x,int *y)
+{
+	int fd;
+	unsigned char size[4];
+
+	fd = open(name, O_RDONLY);
+	if (fd == -1) {
+		return(FH_ERROR_FILE);//宏定义FH_ERROR_FILE 1; 见fbv.h
+	}
+	if (lseek(fd, BMP_SIZE_OFFSET, SEEK_SET) == -1) {//BMP_SIZE_OFFSET :28
+		return(FH_ERROR_FORMAT);//FH_ERROR_FORMAT:2
+	}
+	
+	read(fd, size, 4);
+	*x = size[0] + (size[1]<<8) + (size[2]<<16) + (size[3]<<24);
+//	*x-=1;
+	read(fd, size, 4);
+	*y = size[0] + (size[1]<<8) + (size[2]<<16) + (size[3]<<24);
+	
+	close(fd);
+	return(FH_ERROR_OK);
+}
+#endif
+
+//////////////////////////////////////////////////bmp.c///////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////////////////////////////////////main.c///////////////////////////////////////////////////////////////////////////////
+#include <stdio.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <unistd.h>
+#include <getopt.h>
+#include <termios.h>
+#include <string.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <asm/mman.h>
+#include <linux/fb.h>
+#include <pthread.h>
+#include <semaphore.h>
+#include <errno.h>
+#include <dirent.h>
+#include <linux/input.h>
+#include <linux/rtc.h>
+
+
+#include "config.h"
+#include "fbv.h"
+
+
+
+#include <sys/syscall.h>
+#include <unistd.h>
+
+
+#if 1
+#define UI_w 240 
+#define UI_h 320
+ /////////
+
+unsigned char *fbdis = 0;
+ ///////////
+
+static int opt_clear = 1,
+	   opt_alpha = 0,
+	   opt_hide_cursor = 1,
+	   opt_image_info = 1,
+	   opt_stretch = 0,
+	   opt_delay = 0,
+	   opt_enlarge = 0,
+	   opt_ignore_aspect = 0;
+
+
+
+int cmp;
+
+
+
+void display_rgb( unsigned char * dis_data,int W,int H)
+{
+   static int fbfd = 0;
+   static int kh=0;
+    int tfd=0;
+   
+    struct fb_var_screeninfo vinfo;
+    struct fb_fix_screeninfo finfo;
+    int blank=0;
+    long int screensize = 0;
+    
+    unsigned char * buf;
+    int x = 0, y = 0,z=0;
+	
+    // Open the file for reading and writing
+    fbfd = open("/dev/fb0", O_RDWR);//打开显示设备
+    if (fbfd < 0) {
+	   printf("Error: cannot open framebuffer device.\n");
+          exit(1);
+    }
+	    
+	    // Get fixed screen information
+	    if (ioctl(fbfd, FBIOGET_FSCREENINFO, &finfo)) {//
+	        printf("Error reading fixed information.\n");
+	        exit(2);
+	    }
+
+	    // Get variable screen information
+	    if (ioctl(fbfd, FBIOGET_VSCREENINFO, &vinfo)) {//获取屏的显示信息
+	        printf("Error reading variable information.\n");
+	        exit(3);
+	    }
+		 
+
+	    printf("%dx%d, %dbpp\n", vinfo.xres, vinfo.yres, vinfo.bits_per_pixel );//vinfo.bits_per_pixel:每个像素
+																				//所占比特，也就是biBitCount
+
+	    // Figure out the size of the screen in bytes:计算出屏幕大小，单位bit
+	    screensize = vinfo.xres * vinfo.yres * vinfo.bits_per_pixel / 8;
+	    // Map the device to memory：映射设备到内存
+		/*
+			void *mmap(void *start, size_t length, int prot, int flags, int fd, off_t offsize);
+			mmap（）建立内存映射:将某个文件内容映射到内存中，对该内存区域的存取即是对该文件内容的
+			读写。参数start指向欲对应的内存起始地址，通常设为NULL,代表让系统自动选定地址，对应成功后
+			该地址会返回。参数length代表将文件中多大的部分对应到内存。参数prot代表映射区域的保护方式
+			有下列组合:PROT_EXEC 映射区域可被执行 PROT_READ 映射区域可读 PROT_WRITE 映射区域可写 
+			PROT_NONE 映射区域不能存取 参数flags会影响映射区域的各种特性。其中，MAP_SHARED:对映射区域的写入
+			数据会复制回文件中，而且允许其他映射该文件的进程共享 参数fd为open（）返回的文件描述符，
+			代表欲映射到内存的文件。 参数offset为文件映射的偏移量，通常设置为0，代表从文件最前方开始对应
+
+			返回值：成功：返回映射区的内存起始地址，否则返回MAP_FATLED(-1),错误原因在errno中
+		*/
+	    fbdis = (unsigned char *)mmap(0, screensize, PROT_READ | PROT_WRITE, MAP_SHARED, fbfd, 0);
+	    if ((int)fbdis == -1) {
+	        printf("Error: failed to map framebuffer device to memory.\n");
+	        exit(4);
+	    	}
+	int yy=0;	
+  	if(dis_data){
+		buf=fbdis;//往显示内存写入RBG
+		for ( y = 0; y < H/2; y++ )
+			 for ( x = 0; x < W/2; x++ )  {
+				//   buf [ y*Lcd_w*2+x*2] =(dis_data[y*W*3+x*3+2]>>3)|((dis_data[y*W*3+x*3+1]<<3)&0xe0);
+				//   buf [ y*Lcd_w*2+x*2+1] = ((dis_data[y*W*3+x*3+1]>>5)&0x07)|(dis_data[y*W*3+x*3]&0xf8);
+				//dis_data[y*W*3+x*3]=0;
+				//dis_data[y*W*3+x*3+1]=x;
+				//dis_data[y*W*3+x*3+2]=0;
+				
+				  buf [ y*UI_w*2+x*2] =(((dis_data[y*W*3+x*3+2]>>3)&0x1f)|((dis_data[y*W*3+x*3+1]<<1)&0xe0));
+				  buf [ y*UI_w*2+x*2+1] = (((dis_data[y*W*3+x*3+1]>>6)&0x07)|((dis_data[y*W*3+x*3]>>2)&0x78));
+				//  buf [ y*UI_w*2+x*2+1] = ((dis_data[y*W*3+x*3]>>1)&0x78);
+				 }
+
+		
+	  }
+	    
+	  munmap(fbdis, screensize);//关闭设备
+	  close(fbfd);
+	  printf("end of display rgb\n");    	
+  
+
+}
+
+int disp_image(char *filename)//显示图片
+{
+	int (*load)(char *, unsigned char *, unsigned char **, int, int);//申明加载
+       static int k=1;
+	unsigned char * image = NULL;
+	unsigned char * alpha = NULL;
+	
+	int x_size, y_size, screen_width, screen_height;
+	int x_pan, y_pan, x_offs, y_offs, refresh = 1, c, ret = 1;
+	int delay = opt_delay, retransform = 1;
+	
+	int transform_stretch = opt_stretch, transform_enlarge = opt_enlarge, transform_cal = (opt_stretch == 2),
+	    transform_iaspect = opt_ignore_aspect, transform_rotation = 0;
+	
+#ifdef FBV_SUPPORT_GIF
+	if(fh_gif_id(filename))
+		if(fh_gif_getsize(filename, &x_size, &y_size) == FH_ERROR_OK)
+		{
+			load = fh_gif_load;
+			goto identified1;
+		}
+#endif
+
+#ifdef FBV_SUPPORT_PNG
+	if(fh_png_id(filename))
+		if(fh_png_getsize(filename, &x_size, &y_size) == FH_ERROR_OK)
+		{
+			load = fh_png_load;
+			goto identified1;
+		}
+#endif
+
+#ifdef FBV_SUPPORT_JPEG
+	if(fh_jpeg_id(filename))
+		if(fh_jpeg_getsize(filename, &x_size, &y_size) == FH_ERROR_OK)
+		{
+			load = fh_jpeg_load;
+			goto identified1;
+		}
+#endif
+
+#ifdef FBV_SUPPORT_BMP
+	if(fh_bmp_id(filename))//判断是否为bmp格式，见bmp.c
+		if(fh_bmp_getsize(filename, &x_size, &y_size) == FH_ERROR_OK)//读取图片信息
+		{
+			load = fh_bmp_load;
+			goto identified1;
+		}
+
+#endif
+	printf("%s: Unable to access file or file format unknown.\n", filename);
+
+	return(1);
+
+identified1:
+	
+	if(!(image = (unsigned char*) malloc(x_size * y_size * 3)))
+	{
+		fprintf(stderr, "%s: Out of memory.\n", filename);
+		goto error_mem;
+	}
+	
+	if(load(filename, image, &alpha, x_size, y_size) != FH_ERROR_OK)
+	{
+		fprintf(stderr, "%s: Image data is corrupt?\n", filename);
+	//	goto error_mem;
+	}
+	
+	if(!opt_alpha)
+	{
+		free(alpha);
+		alpha = NULL;
+	}
+	 ret=0;
+	printf("dx=%d,dy=%d\n",x_size,y_size);
+      	display_rgb( image,x_size,y_size);
+     
+done:
+	if(opt_clear)
+	{
+	//	printf("\033[H\033[J");
+		fflush(stdout);
+	}
+	
+error_mem:
+	free(image);
+	free(alpha);
+	
+	return(ret);
+
+}
+
+
+
+
+int main()
+{
+	//////////////////////
+	/////
+	disp_image("1.bmp");
+	printf("begin main 00\n");
+
+	
+}
+
+
+#endif
+
+//////////////////////////////////////////////////main.c///////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////config.h/////////////////////////////////////////////////////////////////////////
+
+#define IDSTRING "fbv 1.0b, s-tech"
+#define DEFAULT_FRAMEBUFFER "/dev/fb0"
+//#define FBV_SUPPORT_JPEG
+//#define FBV_SUPPORT_PNG
+#define FBV_SUPPORT_BMP
+
+////////////////////////////////////////////////config.h///////////////////////////////////////////////////////////////////////////
+
+
+
+
+//////////////////////////////////////////////////fbv.h///////////////////////////////////////////////////////////////////////////////
+/*
+    fbv  --  simple image viewer for the linux framebuffer
+    Copyright (C) 2000, 2001, 2003  Mateusz Golicz
+
+    This program is free software; you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation; either version 2 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program; if not, write to the Free Software
+    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+*/
+
+#define FH_ERROR_OK 0
+#define FH_ERROR_FILE 1		/* read/access error */
+#define FH_ERROR_FORMAT 2	/* file format error */
+int dis_w,dis_h;
+int one_pic;
+void fb_display(unsigned char *rgbbuff, unsigned char * alpha, int x_size, int y_size, int x_pan, int y_pan, int x_offs, int y_offs);
+void getCurrentRes(int *x, int *y);
+
+int fh_bmp_id(char *name);
+int fh_bmp_load(char *name,unsigned char *buffer, unsigned char **alpha, int x,int y);
+int fh_bmp_getsize(char *name,int *x,int *y);
+
+int fh_jpeg_id(char *name);
+int fh_jpeg_load(char *name,unsigned char *buffer, unsigned char **alpha, int x,int y);
+int fh_jpeg_getsize(char *name,int *x,int *y);
+
+int fh_png_id(char *name);
+int fh_png_load(char *name,unsigned char *buffer, unsigned char **alpha, int x,int y);
+int fh_png_getsize(char *name,int *x,int *y);
+
+int fh_gif_id(char *name);
+int fh_gif_load(char *name,unsigned char *buffer, unsigned char **alpha, int x,int y);
+int fh_gif_getsize(char *name,int *x,int *y);
+
+struct image
+{
+	int width, height;
+	unsigned char *rgb;
+	unsigned char *alpha;
+	int do_free;
+};
+
+
+
+#ifndef min
+#define min(a,b) ((a) < (b) ? (a) : (b))
+#endif
+#ifndef max
+#define max(a,b) ((a) > (b) ? (a) : (b))
+#endif
+unsigned char * simple_resize(unsigned char * orgin,int ox,int oy,int dx,int dy);
+unsigned char * alpha_resize(unsigned char * alpha,int ox,int oy,int dx,int dy);
+unsigned char * color_average_resize(unsigned char * orgin,int ox,int oy,int dx,int dy);
+unsigned char * rotate(unsigned char *i, int ox, int oy, int rot);
+unsigned char * alpha_rotate(unsigned char *i, int ox, int oy, int rot);
+void center_resize_qcif(char *disy_buf,char *inpic_buf,int in_w,int in_h);
+
+//////////////////////////////////////////////////fbv.h///////////////////////////////////////////////////////////////////////////////
+
+
+
+
+//////////////////////////////////////////////////makefile///////////////////////////////////////////////////////////////////////////////
+
+
+#
+# Makefile
+#
+
+include Make.conf
+
+CC	= arm-linux-gcc 
+CFLAGS  = -O2 -Wall -D_GNU_SOURCE -I/usr/local/include/ # -L/usr/local/lib
+SOURCES	=main.c  bmp.c  #in_device.c 
+OBJECTS	= ${SOURCES:.c=.o}
+
+OUT	= fbs
+#LIBS	= -lungif -L/usr/X11R6/lib -ljpeg -lpng
+
+all: $(OUT)
+	@echo Build DONE.
+
+$(OUT): $(OBJECTS)
+	$(CC) $(LDFLAGS) $(CFLAGS) -o $(OUT) $(OBJECTS) $(LIBS)  $ -lpthread
+
+clean:
+	rm -f $(OBJECTS) *~ $$$$~* *.bak core config.log $(OUT)
+
+distclean: clean
+	@echo -e "error:\n\t@echo Please run ./configure first..." >Make.conf
+	rm -f $(OUT) config.h
+
+install: $(OUT)
+	cp $(OUT) $(DESTDIR)$(bindir)
+	gzip -9c $(OUT).1 > $(DESTDIR)$(mandir)/man1/$(OUT).1.gz
+
+uninstall: $(DESTDIR)$(bindir)/$(OUT)
+	rm -f $(DESTDIR)$(bindir)/$(OUT)
+	rm -f $(DESTDIR)$(mandir)/man1/$(OUT).1.gz
+
+//////////////////////////////////////////////////makefile///////////////////////////////////////////////////////////////////////////////
+
+
